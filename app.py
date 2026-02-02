@@ -16,26 +16,36 @@ st.title("📊 Stock Dilution Risk Checker")
 @st.cache_data(ttl=3600)
 def fetch_shares_outstanding(ticker: str):
     """Fetch historical shares outstanding (best-effort)"""
-    stock = yf.Ticker(ticker)
-    shares_data = None
-
     try:
-        # Attempt quarterly financials
-        shares_data = stock.quarterly_financials.T  # transpose: dates as rows
-        shares_data = shares_data.rename(columns=lambda x: x.replace(" ", "_"))
+        stock = yf.Ticker(ticker)
 
-        # fallback: info['sharesOutstanding'] (current only)
+        # Attempt quarterly financials
+        shares_df = pd.DataFrame()
+
+        # First, try stock info (current shares only)
         current_shares = stock.info.get("sharesOutstanding")
         if current_shares:
-            shares_data["SharesOutstanding"] = current_shares
+            shares_df = pd.DataFrame({
+                "SharesOutstanding": [current_shares]
+            }, index=[pd.Timestamp("Today")])
 
-        if shares_data.empty:
+        # Optionally, try history of quarterly shares (some tickers may provide)
+        try:
+            hist = stock.quarterly_financials.T
+            if not hist.empty:
+                hist = hist.rename(columns=lambda x: x.replace(" ", "_"))
+                if "SharesOutstanding" in hist.columns:
+                    shares_df = hist[["SharesOutstanding"]]
+        except Exception:
+            pass
+
+        if shares_df.empty:
             return None
 
-        return shares_data
+        return shares_df.sort_index()
 
     except Exception as e:
-        st.error(f"Error fetching shares: {e}")
+        st.error(f"Error fetching shares for {ticker}: {e}")
         return None
 
 
@@ -43,9 +53,6 @@ def compute_dilution(shares_df: pd.DataFrame):
     """Compute period-to-period dilution % and rating"""
     if shares_df is None or "SharesOutstanding" not in shares_df.columns:
         return None, "⚪ N/A"
-
-    # Sort by date ascending
-    shares_df = shares_df.sort_index()
 
     # Compute % change
     shares_df["DilutionPct"] = shares_df["SharesOutstanding"].pct_change() * 100
@@ -72,19 +79,22 @@ ticker = st.text_input("Enter stock ticker (e.g. AAPL, MSFT, KO)").upper().strip
 analyze = st.button("Check Dilution Risk")
 
 if analyze and ticker:
-    with st.spinner("Fetching shares data..."):
+    with st.spinner(f"Fetching shares data for {ticker}..."):
         shares_df = fetch_shares_outstanding(ticker)
         time.sleep(0.2)  # small delay for cache
 
     if shares_df is None or shares_df.empty:
         st.error("Shares outstanding data unavailable for this ticker.")
-        st.stop()
+    else:
+        st.subheader("Shares Outstanding Data (last 5 periods)")
+        st.dataframe(shares_df.tail(5))
 
-    st.subheader("Shares Outstanding Data (last 5 periods)")
-    st.dataframe(shares_df.tail(5))
+        last_dilution, rating = compute_dilution(shares_df)
 
-    last_dilution, rating = compute_dilution(shares_df)
+        if last_dilution is not None:
+            st.metric("Last Period Dilution (%)", f"{last_dilution:.2f}%")
+        st.markdown(f"**Dilution Risk Rating:** {rating}")
 
-    if last_dilution is not None:
-        st.metric("Last Period Dilution (%)", f"{last_dilution:.2f}%")
-    st.markdown(f"**Dilution Risk Rating:** {rating}")
+        # Optional: line chart of dilution trend
+        if "DilutionPct" in shares_df.columns:
+            st.line_chart(shares_df["DilutionPct"].dropna(), height=250)
